@@ -93,7 +93,7 @@ See the [[FAQ]] for what to do about each warning.
 
 ## Check the BPM by ear
 
-**Play with click** plays the beat with a click on every beat. **Jump to end** plays the last 30 seconds. If the click still lines up with the kick at the end of the track, the BPM is locked in. You can switch ½× / 1× / 2× while it plays.
+**Play** plays the beat with a click on every beat. Use **Click on / Click off** next to it to listen with or without the click, even while it plays. **Jump to end** plays the last 30 seconds. If the click still lines up with the kick at the end of the track, the BPM is locked in. You can switch ½× / 1× / 2× while it plays.
 
 ## Previous
 

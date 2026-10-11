@@ -44,8 +44,11 @@ function onsetEnvelope(x, sr, hop, N, progress) {
   const env = new Float32Array(frames);
   const low = new Float32Array(frames);
   const body = new Float32Array(frames);
+  const snare = new Float32Array(frames);
   const lowBin = Math.max(2, Math.round(160 / sr * N));
   const bodyBin = Math.max(lowBin + 1, Math.round(1500 / sr * N));
+  // snare and clap crack (1.5-5 kHz), used to tell a backbeat from a half-time feel
+  const snareLo = bodyBin + 1, snareHi = Math.round(5000 / sr * N);
   let prevLin = new Float32Array(N / 2), curLin = new Float32Array(N / 2);
   const re = new Float64Array(N), im = new Float64Array(N);
   const half = N / 2;
@@ -55,21 +58,22 @@ function onsetEnvelope(x, sr, hop, N, progress) {
     const off = f * hop;
     for (let i = 0; i < N; i++) { re[i] = x[off + i] * win[i]; im[i] = 0; }
     fftInPlace(re, im);
-    let flux = 0, lf = 0, bf = 0;
+    let flux = 0, lf = 0, bf = 0, sf = 0;
     for (let k = 1; k < maxBin; k++) {
       const mag = Math.hypot(re[k], im[k]);
       const m = Math.log1p(1000 * mag);
       cur[k] = m;
       const d = m - prev[k];
       if (d > 0 && f > 0) { flux += d; if (k <= lowBin) lf += d; }
+      if (k >= snareLo && k <= snareHi) { curLin[k] = mag; const dl = mag - prevLin[k]; if (dl > 0 && f > 0) sf += dl; }
       if (k <= bodyBin) { curLin[k] = mag; const dl = mag - prevLin[k]; if (dl > 0 && f > 0) bf += dl; }
     }
-    env[f] = flux; low[f] = lf; body[f] = bf;
+    env[f] = flux; low[f] = lf; body[f] = bf; snare[f] = sf;
     const t = prev; prev = cur; cur = t;
     const tl = prevLin; prevLin = curLin; curLin = tl;
     if (progress && (f & 2047) === 0) progress(0.05 + 0.45 * f / frames);
   }
-  return { env, low, body };
+  return { env, low, body, snare };
 }
 
 // ---------- Global tempo estimate (weighted autocorrelation) ----------
@@ -88,7 +92,28 @@ function autocorr(o, top) {
 // 2. Choose between half and double speed of that pulse. A faster level is only accepted when the in-between
 //    beats carry drum "body" (kick and snare, below ~2.5 kHz) about as strongly as the beats themselves, so
 //    off-beat hi-hats can't double the tempo, while a rock backbeat (kick and snare alternating) can.
-function estimatePeriod(o, fps, body) {
+// How often the snare/clap repeats, counted in beats of the given period: 2 for a backbeat (2 and 4),
+// 4 for a half-time snare on 3, 8 when it lands only once every two bars of that pulse. Returns 0 if unclear.
+function snareRepeat(o, snare, period) {
+  const { beats } = trackBeats(o, period);
+  const rad = Math.max(1, Math.round(period * 0.15));
+  const s = beats.map(b => { let m = 0; for (let i = Math.max(0, b - rad); i <= Math.min(snare.length - 1, b + rad); i++) if (snare[i] > m) m = snare[i]; return m; });
+  if (s.length < 32) return 0;
+  const corr = k => {
+    let ma = 0, mb = 0; const n = s.length - k;
+    for (let i = 0; i < n; i++) { ma += s[i]; mb += s[i + k]; }
+    ma /= n; mb /= n;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < n; i++) { const a = s[i] - ma, b = s[i + k] - mb; sab += a * b; saa += a * a; sbb += b * b; }
+    return sab / Math.max(1e-12, Math.sqrt(saa * sbb));
+  };
+  const c1 = corr(1), c2 = corr(2), c4 = corr(4), c8 = corr(8);
+  // only call it when the once-per-8 pattern is strong and nothing repeats any sooner
+  if (c8 > 0.5 && Math.max(c1, c2, c4) < 0.25 * c8) return 8;
+  return 0;
+}
+
+function estimatePeriod(o, fps, body, snare) {
   const minLag = Math.floor(fps * 60 / 215), maxLag = Math.ceil(fps * 60 / 50);
   const top = 4 * maxLag + 2;
   const acFull = autocorr(o, top);
@@ -123,7 +148,11 @@ function estimatePeriod(o, fps, body) {
     const fullRatio = at(nFull, L / 2) / Math.max(1e-9, at(nFull, L));
     // faster level wins if the drums themselves play it (rock, punk, drum & bass), or if the
     // hats/percussion drive it and it is the more typical tempo (trap is written at 140, not 70)
-    if (bodyRatio >= 0.62 || (fullRatio >= 0.62 && typical(L / 2) < typical(L))) L /= 2; else break;
+    if (!(bodyRatio >= 0.62 || (fullRatio >= 0.62 && typical(L / 2) < typical(L)))) break;
+    // at the faster speed every bar would need a snare or clap; if it only lands once every two of those
+    // bars (an R&B or hip-hop half-time feel, clap on 3), the slower tempo is the one producers use
+    if (snare && snareRepeat(o, snare, L / 2) === 8) break;
+    L /= 2;
   }
   return L;
 }
@@ -194,7 +223,7 @@ function median(arr) {
 function precisionTempo(x, sr, progress) {
   const hop = 256, N = 1024;
   const fps = sr / hop;
-  const { env: raw, low, body: rawBody } = onsetEnvelope(x, sr, hop, N, progress);
+  const { env: raw, low, body: rawBody, snare: rawSnare } = onsetEnvelope(x, sr, hop, N, progress);
   // normalized envelope for tracking: remove slow trend, scale
   const n = raw.length;
   const o = new Float32Array(n);
@@ -226,7 +255,16 @@ function precisionTempo(x, sr, progress) {
     const sdB = Math.sqrt(accB / Math.max(1, n)) || 1;
     for (let i = 0; i < n; i++) bodyN[i] /= sdB;
   }
-  const p0 = estimatePeriod(o, fps, bodyN);
+  const snareN = new Float32Array(n);
+  {
+    const ps = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) ps[i + 1] = ps[i] + rawSnare[i];
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, i - half), b = Math.min(n, i + half + 1);
+      snareN[i] = Math.max(0, rawSnare[i] - (ps[b] - ps[a]) / (b - a));
+    }
+  }
+  const p0 = estimatePeriod(o, fps, bodyN, snareN);
   const { beats } = trackBeats(o, p0);
   if (progress) progress(0.65);
 

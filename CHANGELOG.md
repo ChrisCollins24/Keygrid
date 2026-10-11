@@ -2,6 +2,16 @@
 
 All notable changes to Keygrid. Newest first.
 
+## 1.1.3 (2026-10-11)
+
+### Fixed
+- **Half-time R&B and hip-hop beats are no longer read at double speed.** When the clap or snare only lands on beat 3 (a half-time feel), Keygrid now gives the tempo producers actually use, like 91 instead of 183. Rock, punk and drum & bass still read at full speed, and trap stays at 140.
+
+### Added
+- **Click on / off.** Play now has a click toggle next to it, so you can listen to the beat with or without the metronome. You can switch it while the beat is playing, and Keygrid remembers your choice.
+
+Thanks to a producer friend for both suggestions.
+
 ## 1.1.2 (2026-10-09)
 
 ### Fixed

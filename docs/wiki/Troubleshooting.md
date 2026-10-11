@@ -28,7 +28,7 @@ Then open Keygrid again.
 - WAV, MP3, AIFF and M4A work best. If a FLAC or OGG file won't load, convert it to WAV and try again.
 - Make sure the file is fully downloaded and not still syncing from iCloud or Google Drive.
 
-### There's no sound from Play with click, the piano or Play chord
+### There's no sound from Play, the click, the piano or Play chord
 
 - Check your computer's volume and output device (Mac: System Settings → Sound → Output; Windows: Settings → System → Sound).
 - If you use an audio interface, make sure it's the selected output and its monitor level is up.

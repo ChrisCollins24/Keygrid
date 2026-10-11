@@ -90,6 +90,8 @@ select { background: var(--panel); border: 1px solid var(--line); border-radius:
 .btn, .seg button { transition: background .2s, border-color .2s, color .2s; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
 .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+.btn.toggle[aria-pressed="true"] { background: transparent; color: var(--accent); border-color: var(--accent); }
+.btn.toggle[aria-pressed="false"] { color: var(--muted); }
 .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
 
 /* load bay */
@@ -314,7 +316,7 @@ svg text { fill: var(--muted); font-family: var(--f-data); font-size: 10px; }
     <p><b>Vocal reverb</b> settings are for ValhallaVintageVerb. PreDelay and Decay are timed from the BPM so the reverb fades out with the beat. Mix is set for the plugin on the vocal track.</p>
     <p><b>Vocal delay</b> times are in milliseconds for any delay plugin. Dotted 1/8 and 1/4 are the most common for vocal echoes and throws.</p>
     <p><b>Beat health</b> checks the beat before you record on it. Peak is the loudest sample. Loudness is integrated LUFS (the streaming standard). Dynamics is the gap between peak and loudness; small numbers mean the beat is squashed. Mono check measures how the left and right sides line up; a negative number means parts of the beat cancel out on mono speakers.</p>
-    <p><b>Check it by ear.</b> Press Play with click, then Jump to end. If the click is still locked to the kick at the end of the track, the BPM is right.</p>
+    <p><b>Check it by ear.</b> Press Play with the click on, then Jump to end. If the click is still locked to the kick at the end of the track, the BPM is right.</p>
     <p><b>Credits.</b> Built with <a href="https://tauri.app" target="_blank" rel="noopener">Tauri</a> and the Outfit, Figtree and IBM Plex Mono fonts (SIL Open Font License). Beat tracking follows Ellis (2007); key detection uses the Krumhansl–Kessler and Temperley key profiles; loudness follows ITU-R BS.1770. Designed by Christian Collins and written with the help of Claude by Anthropic. Full credits and license texts: <a href="https://github.com/ChrisCollins24/KeyGrid/blob/main/THIRD-PARTY-NOTICES.md" target="_blank" rel="noopener">third-party notices</a>.</p>
     <p><b>Feedback.</b> Questions, bugs or ideas? Email keygridapp@gmail.com.</p>
     <p class="fine">Keygrid is not affiliated with or endorsed by Valhalla DSP, Avid (Pro Tools), Antares (Auto-Tune), Celemony (Melodyne) or Mixed In Key. Product names are trademarks of their owners and are mentioned only to describe compatibility.</p>
@@ -377,8 +379,11 @@ function onsetEnvelope(x, sr, hop, N, progress) {
   const env = new Float32Array(frames);
   const low = new Float32Array(frames);
   const body = new Float32Array(frames);
+  const snare = new Float32Array(frames);
   const lowBin = Math.max(2, Math.round(160 / sr * N));
   const bodyBin = Math.max(lowBin + 1, Math.round(1500 / sr * N));
+  // snare and clap crack (1.5-5 kHz), used to tell a backbeat from a half-time feel
+  const snareLo = bodyBin + 1, snareHi = Math.round(5000 / sr * N);
   let prevLin = new Float32Array(N / 2), curLin = new Float32Array(N / 2);
   const re = new Float64Array(N), im = new Float64Array(N);
   const half = N / 2;
@@ -388,21 +393,22 @@ function onsetEnvelope(x, sr, hop, N, progress) {
     const off = f * hop;
     for (let i = 0; i < N; i++) { re[i] = x[off + i] * win[i]; im[i] = 0; }
     fftInPlace(re, im);
-    let flux = 0, lf = 0, bf = 0;
+    let flux = 0, lf = 0, bf = 0, sf = 0;
     for (let k = 1; k < maxBin; k++) {
       const mag = Math.hypot(re[k], im[k]);
       const m = Math.log1p(1000 * mag);
       cur[k] = m;
       const d = m - prev[k];
       if (d > 0 && f > 0) { flux += d; if (k <= lowBin) lf += d; }
+      if (k >= snareLo && k <= snareHi) { curLin[k] = mag; const dl = mag - prevLin[k]; if (dl > 0 && f > 0) sf += dl; }
       if (k <= bodyBin) { curLin[k] = mag; const dl = mag - prevLin[k]; if (dl > 0 && f > 0) bf += dl; }
     }
-    env[f] = flux; low[f] = lf; body[f] = bf;
+    env[f] = flux; low[f] = lf; body[f] = bf; snare[f] = sf;
     const t = prev; prev = cur; cur = t;
     const tl = prevLin; prevLin = curLin; curLin = tl;
     if (progress && (f & 2047) === 0) progress(0.05 + 0.45 * f / frames);
   }
-  return { env, low, body };
+  return { env, low, body, snare };
 }
 
 // ---------- Global tempo estimate (weighted autocorrelation) ----------
@@ -421,7 +427,28 @@ function autocorr(o, top) {
 // 2. Choose between half and double speed of that pulse. A faster level is only accepted when the in-between
 //    beats carry drum "body" (kick and snare, below ~2.5 kHz) about as strongly as the beats themselves, so
 //    off-beat hi-hats can't double the tempo, while a rock backbeat (kick and snare alternating) can.
-function estimatePeriod(o, fps, body) {
+// How often the snare/clap repeats, counted in beats of the given period: 2 for a backbeat (2 and 4),
+// 4 for a half-time snare on 3, 8 when it lands only once every two bars of that pulse. Returns 0 if unclear.
+function snareRepeat(o, snare, period) {
+  const { beats } = trackBeats(o, period);
+  const rad = Math.max(1, Math.round(period * 0.15));
+  const s = beats.map(b => { let m = 0; for (let i = Math.max(0, b - rad); i <= Math.min(snare.length - 1, b + rad); i++) if (snare[i] > m) m = snare[i]; return m; });
+  if (s.length < 32) return 0;
+  const corr = k => {
+    let ma = 0, mb = 0; const n = s.length - k;
+    for (let i = 0; i < n; i++) { ma += s[i]; mb += s[i + k]; }
+    ma /= n; mb /= n;
+    let sab = 0, saa = 0, sbb = 0;
+    for (let i = 0; i < n; i++) { const a = s[i] - ma, b = s[i + k] - mb; sab += a * b; saa += a * a; sbb += b * b; }
+    return sab / Math.max(1e-12, Math.sqrt(saa * sbb));
+  };
+  const c1 = corr(1), c2 = corr(2), c4 = corr(4), c8 = corr(8);
+  // only call it when the once-per-8 pattern is strong and nothing repeats any sooner
+  if (c8 > 0.5 && Math.max(c1, c2, c4) < 0.25 * c8) return 8;
+  return 0;
+}
+
+function estimatePeriod(o, fps, body, snare) {
   const minLag = Math.floor(fps * 60 / 215), maxLag = Math.ceil(fps * 60 / 50);
   const top = 4 * maxLag + 2;
   const acFull = autocorr(o, top);
@@ -456,7 +483,11 @@ function estimatePeriod(o, fps, body) {
     const fullRatio = at(nFull, L / 2) / Math.max(1e-9, at(nFull, L));
     // faster level wins if the drums themselves play it (rock, punk, drum & bass), or if the
     // hats/percussion drive it and it is the more typical tempo (trap is written at 140, not 70)
-    if (bodyRatio >= 0.62 || (fullRatio >= 0.62 && typical(L / 2) < typical(L))) L /= 2; else break;
+    if (!(bodyRatio >= 0.62 || (fullRatio >= 0.62 && typical(L / 2) < typical(L)))) break;
+    // at the faster speed every bar would need a snare or clap; if it only lands once every two of those
+    // bars (an R&B or hip-hop half-time feel, clap on 3), the slower tempo is the one producers use
+    if (snare && snareRepeat(o, snare, L / 2) === 8) break;
+    L /= 2;
   }
   return L;
 }
@@ -527,7 +558,7 @@ function median(arr) {
 function precisionTempo(x, sr, progress) {
   const hop = 256, N = 1024;
   const fps = sr / hop;
-  const { env: raw, low, body: rawBody } = onsetEnvelope(x, sr, hop, N, progress);
+  const { env: raw, low, body: rawBody, snare: rawSnare } = onsetEnvelope(x, sr, hop, N, progress);
   // normalized envelope for tracking: remove slow trend, scale
   const n = raw.length;
   const o = new Float32Array(n);
@@ -559,7 +590,16 @@ function precisionTempo(x, sr, progress) {
     const sdB = Math.sqrt(accB / Math.max(1, n)) || 1;
     for (let i = 0; i < n; i++) bodyN[i] /= sdB;
   }
-  const p0 = estimatePeriod(o, fps, bodyN);
+  const snareN = new Float32Array(n);
+  {
+    const ps = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) ps[i + 1] = ps[i] + rawSnare[i];
+    for (let i = 0; i < n; i++) {
+      const a = Math.max(0, i - half), b = Math.min(n, i + half + 1);
+      snareN[i] = Math.max(0, rawSnare[i] - (ps[b] - ps[a]) / (b - a));
+    }
+  }
+  const p0 = estimatePeriod(o, fps, bodyN, snareN);
   const { beats } = trackBeats(o, p0);
   if (progress) progress(0.65);
 
@@ -1181,6 +1221,11 @@ self.onmessage = e => {
   let defaultMult = 1;
   try { const m = Number(localStorage.getItem('kg-mult')); if (m === 0.5 || m === 1 || m === 2) defaultMult = m; } catch (e) {}
   function setDefaultMult(m) { defaultMult = m; try { localStorage.setItem('kg-mult', String(m)); } catch (e) {} }
+  // the metronome click can be turned off to just listen to the beat; the choice is remembered
+  let clickOn = true;
+  try { if (localStorage.getItem('kg-click') === 'off') clickOn = false; } catch (e) {}
+  function setClickOn(on) { clickOn = on; try { localStorage.setItem('kg-click', on ? 'on' : 'off'); } catch (e) {} }
+  const clickBtn = () => `<button class="btn toggle" type="button" data-act="click" aria-pressed="${clickOn}" title="Turn the click on or off, even while playing">${clickOn ? 'Click on' : 'Click off'}</button>`;
 
   // play any key on a piano, used by the empty card (no key detected, so no tuning offset)
   function bindFreePiano(root, detune) {
@@ -1307,10 +1352,11 @@ self.onmessage = e => {
         ${notes.map(n => `<p class="hint">${n}</p>`).join('')}</div>
       ${panelsHtml(t)}
       <div class="strip">
-        <button class="btn primary" type="button" data-act="play" ${canPlay ? '' : 'disabled'}>${t.playing ? 'Stop' : 'Play with click'}</button>
+        <button class="btn primary" type="button" data-act="play" ${canPlay ? '' : 'disabled'}>${t.playing ? 'Stop' : 'Play'}</button>
+        ${clickBtn()}
         <button class="btn" type="button" data-act="end" ${canPlay ? '' : 'disabled'}>Jump to end</button>
         <span class="time" data-time>${t.playing ? '' : '0:00 / ' + fmtTime(r.duration)}</span>
-        <span class="hint">${canPlay ? 'If the click stays on the kick through the end, the BPM is locked.' : ''}</span>
+        <span class="hint">${!canPlay ? '' : clickOn ? 'If the click stays on the kick through the end, the BPM is locked.' : 'Click is off. Turn it on to check the BPM by ear.'}</span>
       </div>`;
     t.el.querySelectorAll('[data-mult]').forEach(b => b.addEventListener('click', () => { t.mult = Number(b.dataset.mult); setDefaultMult(t.mult); render(t); }));
     bindPiano(t);
@@ -1326,6 +1372,7 @@ self.onmessage = e => {
     });
     t.el.querySelectorAll('[data-feel]').forEach(b => b.addEventListener('click', () => { t.feel = b.dataset.feel; render(t); }));
     t.el.querySelector('[data-act="play"]').addEventListener('click', () => togglePlay(t, 0));
+    t.el.querySelector('[data-act="click"]').addEventListener('click', () => { setClickOn(!clickOn); render(t); t.el.querySelector('[data-act="click"]').focus(); });
     t.el.querySelector('[data-act="end"]').addEventListener('click', () => togglePlay(t, Math.max(0, r.duration - 30), true));
   }
 
@@ -1444,7 +1491,7 @@ self.onmessage = e => {
   window.addEventListener('blur', () => { dragDepth = 0; showVeil(false); });
   $('#demo').addEventListener('click', e => { e.stopPropagation(); getCtx(); showTrack(addTrack({ name: 'Test track · 127.9850 BPM · E major', demo: true })); });
 
-  // ---------- playback with click ----------
+  // ---------- playback, with or without the click ----------
   let player = null; // {t, src, timer, start, offset}
   function stopIfPlaying(t) { if (player && player.t === t) stop(); }
   function stop() {
@@ -1452,7 +1499,7 @@ self.onmessage = e => {
     try { player.src.stop(); } catch (e) {}
     clearInterval(player.timer);
     const t = player.t; t.playing = false; player = null;
-    const b = t.el.querySelector('[data-act="play"]'); if (b) b.textContent = 'Play with click';
+    const b = t.el.querySelector('[data-act="play"]'); if (b) b.textContent = 'Play';
     const tm = t.el.querySelector('[data-time]'); if (tm) tm.textContent = '0:00 / ' + fmtTime(t.result.duration);
   }
   function click(time, gain) {
@@ -1487,7 +1534,7 @@ self.onmessage = e => {
       while (true) {
         const bt = G + k * P;
         if (bt > pos + 0.25) break;
-        if (bt > lastBt && bt >= offset && bt < buffer.duration) { click(start + (bt - offset), 0.35); lastBt = bt; }
+        if (bt > lastBt && bt >= offset && bt < buffer.duration) { if (clickOn) click(start + (bt - offset), 0.35); lastBt = bt; }
         k++;
       }
       const tm = t.el.querySelector('[data-time]');
@@ -1659,12 +1706,14 @@ self.onmessage = e => {
         <div class="fx-panel" role="tabpanel" id="fxp-${t.id}" aria-labelledby="fx-${t.id}-${fx}">${body}</div>
       </div>
       <div class="strip">
-        <button class="btn primary" type="button" disabled>Play with click</button>
+        <button class="btn primary" type="button" disabled>Play</button>
+        ${clickBtn()}
         <button class="btn" type="button" disabled>Jump to end</button>
         <span class="time">0:00 / 0:00</span>
         <span class="hint">Drop a beat anywhere on this window, or use Choose files.</span>
       </div>`;
     t.el.querySelectorAll('[data-mult]').forEach(b => b.addEventListener('click', () => { setDefaultMult(Number(b.dataset.mult)); renderEmpty(t); }));
+    t.el.querySelector('[data-act="click"]').addEventListener('click', () => { setClickOn(!clickOn); renderEmpty(t); t.el.querySelector('[data-act="click"]').focus(); });
     const freePiano = t.el.querySelector('.piano');
     if (freePiano) bindFreePiano(freePiano, 0);
     const tabs = [...t.el.querySelectorAll('[data-fx]')];
