@@ -10,7 +10,7 @@ All notable changes to Keygrid. Newest first.
 ### Added
 - **Click on / off.** Play now has a click toggle next to it, so you can listen to the beat with or without the metronome. You can switch it while the beat is playing, and Keygrid remembers your choice.
 
-Thanks to Connor Aurand for both suggestions.
+Thanks to Connor Aurand ([@prodby_c4](https://www.instagram.com/prodby_c4/)) for both suggestions.
 
 ## 1.1.2 (2026-10-09)
 
