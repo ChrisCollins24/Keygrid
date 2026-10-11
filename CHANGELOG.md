@@ -2,6 +2,11 @@
 
 All notable changes to Keygrid. Newest first.
 
+## 1.1.4 (2026-10-11)
+
+### Fixed
+- **Trap beats with a bouncy kick pattern now read at the right tempo.** When the kick and 808 repeat every beat and a half, Keygrid could lock onto that pattern instead of the beat (for example a 147 BPM beat read as 99.7) and the click drifted off the music. Keygrid now checks that the beats actually line up with the tempo it found, and if they don't, it tries the next most likely tempos and keeps the one that fits. Every other test track reads the same as before.
+
 ## 1.1.3 (2026-10-11)
 
 ### Fixed

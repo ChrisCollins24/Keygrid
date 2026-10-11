@@ -462,18 +462,29 @@ function estimatePeriod(o, fps, body, snare) {
   // a real beat has to show up both in the full sound and in the drum weight (kick, snare, bass)
   const comb = l => Math.sqrt(comb1(nFull, l) * comb1(nBody, l));
   const refine = lag => { const a = ac[lag - 1], b = ac[lag], c = ac[lag + 1], den = a - 2 * b + c; return lag + (den !== 0 ? Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / den)) : 0); };
-  let best = null;
+  const peaks = [];
   for (let lag = minLag; lag <= maxLag; lag++) {
     if (!(ac[lag] >= ac[lag - 1] && ac[lag] >= ac[lag + 1])) continue;
     const L = refine(lag), bpm = 60 * fps / L;
     const w = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 120) / 1.2, 2));
-    const v = comb(L) * w;
-    if (!best || v > best.v) best = { L, v };
+    peaks.push({ L, v: comb(L) * w });
   }
-  if (!best) return fps * 0.5;
+  if (!peaks.length) return [fps * 0.5];
+  peaks.sort((a, b) => b.v - a.v);
+  // the winner first, then up to two runners-up that aren't just a half or double of a pulse already listed
+  // (used when the winner can't be tracked, e.g. a trap kick pattern that repeats every 1.5 beats)
+  const out = [];
+  for (const pk of peaks) {
+    if (out.length === 3 || pk.v < 0.5 * peaks[0].v) break;
+    const L = resolveOctave(pk.L);
+    if (out.every(o => { const r = Math.log2(o / L); return Math.abs(r - Math.round(r)) > 0.08; })) out.push(L);
+  }
+  return out;
+
+  function resolveOctave(L0) {
   // all half/double levels of the winning pulse inside 55-215 BPM, slowest first
   const inRange = L => { const bpm = 60 * fps / L; return bpm >= 55 && bpm <= 215; };
-  let L = best.L;
+  let L = L0;
   while (inRange(L * 2)) L *= 2;
   while (!inRange(L) && L / 2 >= minLag) L /= 2;
   // closeness to a typical tempo (120 BPM), used only to break half/double ties
@@ -490,6 +501,7 @@ function estimatePeriod(o, fps, body, snare) {
     L /= 2;
   }
   return L;
+  }
 }
 
 // ---------- Dynamic-programming beat tracker (Ellis 2007) ----------
@@ -599,9 +611,19 @@ function precisionTempo(x, sr, progress) {
       snareN[i] = Math.max(0, rawSnare[i] - (ps[b] - ps[a]) / (b - a));
     }
   }
-  const p0 = estimatePeriod(o, fps, bodyN, snareN);
+  const candidates = estimatePeriod(o, fps, bodyN, snareN);
+  // fit the grid at the best pulse; if its beats don't line up (scattered by more than 30 ms), try the
+  // runners-up and keep one only if its beats line up at least twice as tightly
+  let best = fitGrid(candidates[0]);
+  for (let i = 1; i < candidates.length && best && best.jitterMs > 30; i++) {
+    const alt = fitGrid(candidates[i]);
+    if (alt && alt.jitterMs < 0.5 * best.jitterMs) best = alt;
+  }
+  if (progress) progress(0.75);
+  return best;
+
+  function fitGrid(p0) {
   const { beats } = trackBeats(o, p0);
-  if (progress) progress(0.65);
 
   // refine each beat to the nearest raw onset peak with sub-frame interpolation
   const rad = Math.max(2, Math.round(p0 * 0.15));
@@ -699,12 +721,12 @@ function precisionTempo(x, sr, progress) {
   }
   // express offset as the first grid beat at or after 0 s
   gridOffset = ((gridOffset % P) + P) % P;
-  if (progress) progress(0.75);
   return {
     bpm, seBpm, period: P, gridOffset, phaseShifted: shiftFrac, beatsUsed: nU, beatsFound: times.length,
     jitterMs: sigma * 1000, beatStrength, local, localSd: lsd, variable, coverage,
     firstBeat: used[0].t, lastBeat: used[nU - 1].t
   };
+  }
 }
 
 // ---------- Key detection ----------
